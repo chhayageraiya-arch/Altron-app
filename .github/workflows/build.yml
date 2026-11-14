@@ -6,6 +6,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: unzip -q ./*.zip
+      - run: printf "android.useAndroidX=true\norg.gradle.jvmargs=-Xmx3g\n" > Altron/gradle.properties
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
