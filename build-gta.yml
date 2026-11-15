@@ -1,0 +1,391 @@
+name: Build Vice Zone
+on: [workflow_dispatch, push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create project
+        run: |
+          mkdir -p gta && cd gta
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF0'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.zone.gta"
+              compileSdk = 34
+              defaultConfig { applicationId = "com.zone.gta"; minSdk = 24; targetSdk = 34; versionCode = 1; versionName = "1.0" }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF0
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF1'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="Vice Zone" android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
+                  <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="sensorLandscape">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF1
+          mkdir -p $(dirname app/src/main/java/com/zone/gta/GView.kt)
+          cat > app/src/main/java/com/zone/gta/GView.kt <<'EOF2'
+          package com.zone.gta
+
+          import android.content.Context
+          import android.graphics.*
+          import android.view.MotionEvent
+          import android.view.View
+          import java.util.Random
+          import kotlin.math.*
+
+          class Car(var x: Float, var y: Float, var ang: Float, val kind: Int) {
+              var spd = 0f; var hp = 100f; var col = Color.GRAY; var cd = 0f; var sh = 0f
+          }
+          class Ped(var x: Float, var y: Float) { var hp = 30f; var vx = 0f; var vy = 0f; var t = 0f; var flee = 0f }
+          class Bu(var x: Float, var y: Float, val vx: Float, val vy: Float, val dmg: Float, val mine: Boolean, var life: Float)
+
+          class GView(c: Context) : View(c) {
+              private val d = resources.displayMetrics.density
+              private val sp = c.getSharedPreferences("gta", Context.MODE_PRIVATE)
+              private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val path = Path()
+              private val rnd = Random()
+              private val CELL = 400f; private val WORLD = 4000f
+              private val bcol = intArrayOf(Color.rgb(140, 90, 80), Color.rgb(90, 110, 140), Color.rgb(120, 120, 90), Color.rgb(100, 130, 100), Color.rgb(130, 100, 130))
+              private val cars = ArrayList<Car>(); private val peds = ArrayList<Ped>(); private val bu = ArrayList<Bu>()
+              private val tmp = FloatArray(2)
+              private var px = sp.getFloat("px", 2060f); private var py = sp.getFloat("py", 2060f)
+              private var pang = 0f; private var php = 100f; private var cash = sp.getInt("cash", 500)
+              private var car: Car? = null
+              private var stars = 0; private var clearT = 0f; private var spawnT = 0f; private var bustT = 0f
+              private var wastedT = 0f; private var saveT = 0f; private var fireCd = 0f; private var time = 0f
+              private var msg = ""; private var msgT = 0f; private var fire = false
+              private var lId = -1; private var fId = -1; private var lcx = 0f; private var lcy = 0f; private var lx = 0f; private var ly = 0f
+              private var last = System.nanoTime(); private var W = 800f; private var H = 360f
+
+              init { repeat(24) { cars.add(newCiv()) }; repeat(45) { peds.add(newPed()) } }
+
+              private fun say(s: String) { msg = s; msgT = 2.5f }
+              private fun solid(x: Float, y: Float): Boolean {
+                  if (x < 0f || y < 0f || x > WORLD || y > WORLD) return true
+                  val a = x % CELL; val b = y % CELL
+                  return a in 150f..370f && b in 150f..370f
+              }
+              private fun blk(x: Float, y: Float, r: Float) = solid(x - r, y - r) || solid(x + r, y - r) || solid(x - r, y + r) || solid(x + r, y + r)
+              private fun mv(x: Float, y: Float, dx: Float, dy: Float, r: Float): Boolean {
+                  var nx = x + dx; var ny = y; var b = false
+                  if (blk(nx, ny, r)) { nx = x; b = true }
+                  ny = y + dy
+                  if (blk(nx, ny, r)) { ny = y; b = true }
+                  tmp[0] = nx; tmp[1] = ny; return b
+              }
+              private fun roadPt(): FloatArray {
+                  val i = rnd.nextInt(10) * CELL + 60f; val t = rnd.nextFloat() * WORLD
+                  return if (rnd.nextBoolean()) floatArrayOf(t, i) else floatArrayOf(i, t)
+              }
+              private fun newCiv(): Car {
+                  val h = rnd.nextBoolean(); val i = rnd.nextInt(10); val t = 100f + rnd.nextFloat() * (WORLD - 200f)
+                  val fwd = rnd.nextBoolean(); val lane = if (fwd) 25f else -25f; val pi = PI.toFloat()
+                  val c = if (h) Car(t, i * CELL + 60f + lane, if (fwd) 0f else pi, 0)
+                  else Car(i * CELL + 60f + lane, t, if (fwd) pi / 2 else -pi / 2, 0)
+                  c.col = Color.rgb(40 + rnd.nextInt(200), 40 + rnd.nextInt(200), 40 + rnd.nextInt(200)); c.spd = 90f
+                  return c
+              }
+              private fun newPed() = Ped(rnd.nextInt(10) * CELL + 135f, rnd.nextInt(10) * CELL + 150f + rnd.nextFloat() * 220f)
+
+              private fun wanted(n: Int) { stars = min(5, max(stars, n)); clearT = 0f; spawnT = min(spawnT, .3f) }
+              private fun respawn() {
+                  php = 100f; cash = (cash * .9f).toInt(); stars = 0; car = null; px = 2060f; py = 2060f
+                  cars.removeAll { it.kind == 1 }; bu.clear()
+              }
+
+              private fun act() {
+                  val c = car
+                  if (c != null) {
+                      for ((ox, oy) in listOf(32f to 0f, -32f to 0f, 0f to 32f, 0f to -32f))
+                          if (!blk(c.x + ox, c.y + oy, 8f)) { px = c.x + ox; py = c.y + oy; break }
+                      c.spd = 0f; car = null
+                  } else {
+                      var best: Car? = null; var bd = 50f
+                      for (o in cars) { val dd = hypot(o.x - px, o.y - py); if (dd < bd) { bd = dd; best = o } }
+                      if (best != null) {
+                          car = best; best.spd = 0f; say("Driving - left stick: gas/steer")
+                          if (best.kind == 1) wanted(3) else if (peds.any { hypot(it.x - px, it.y - py) < 200f }) wanted(1)
+                      }
+                  }
+              }
+
+              private fun shootP() {
+                  fireCd = .18f
+                  var tx = 0f; var ty = 0f; var bd = 380f; var found = false
+                  for (pd in peds) if (pd.hp > 0f) { val dd = hypot(pd.x - px, pd.y - py); if (dd < bd) { bd = dd; tx = pd.x; ty = pd.y; found = true } }
+                  for (c in cars) if (c.kind == 1) { val dd = hypot(c.x - px, c.y - py); if (dd < bd) { bd = dd; tx = c.x; ty = c.y; found = true } }
+                  val a = if (found) atan2(ty - py, tx - px) else pang
+                  pang = a
+                  bu.add(Bu(px + cos(a) * 12f, py + sin(a) * 12f, cos(a) * 650f, sin(a) * 650f, 15f, true, .6f))
+                  for (pd in peds) if (hypot(pd.x - px, pd.y - py) < 380f) { pd.flee = 4f; pd.t = 0f }
+              }
+
+              private fun update(dt: Float) {
+                  time += dt; msgT -= dt; fireCd -= dt; saveT += dt
+                  if (saveT > 5f) { saveT = 0f; sp.edit().putInt("cash", cash).putFloat("px", px).putFloat("py", py).apply() }
+                  if (wastedT > 0f) { wastedT -= dt; if (wastedT <= 0f) respawn(); return }
+                  val cc = car
+                  if (cc != null) drive(cc, dt) else {
+                      if (hypot(lx, ly) > .1f) { pang = atan2(ly, lx); mv(px, py, lx * 95f * dt, ly * 95f * dt, 9f); px = tmp[0]; py = tmp[1] }
+                      if (fire && fireCd <= 0f) shootP()
+                  }
+                  for (c in cars) if (c !== car) { if (c.kind == 0) civ(c, dt) else police(c, dt) }
+                  for (pd in peds) ped(pd, dt)
+                  // wanted level
+                  if (stars > 0) {
+                      val pc = cars.count { it.kind == 1 && it !== car }
+                      spawnT -= dt
+                      if (spawnT <= 0f && pc < min(8, stars * 2)) {
+                          spawnT = 1.5f; val s = roadPt()
+                          if (hypot(s[0] - px, s[1] - py) in 550f..1000f) cars.add(Car(s[0], s[1], 0f, 1))
+                      }
+                      val near = cars.any { it.kind == 1 && it !== car && hypot(it.x - px, it.y - py) < 450f }
+                      if (near) clearT = 0f else { clearT += dt; if (clearT >= 8f) { stars--; clearT = 0f; say("Wanted level dropped") } }
+                  } else cars.removeAll { it.kind == 1 && it !== car }
+                  var arrest = false
+                  for (c in cars) if (c.kind == 1 && c !== car) {
+                      val dd = hypot(px - c.x, py - c.y)
+                      if (stars >= 2 && dd < 330f) {
+                          c.sh -= dt
+                          if (c.sh <= 0f) { c.sh = 1f; val a = atan2(py - c.y, px - c.x) + (rnd.nextFloat() - .5f) * .3f
+                              bu.add(Bu(c.x, c.y, cos(a) * 480f, sin(a) * 480f, 6f, false, .9f)) }
+                      }
+                      if (dd < 30f) { if (cc != null) cc.hp -= 15f * dt else { php -= 10f * dt; arrest = true } }
+                  }
+                  bustT = if (arrest) bustT + dt else 0f
+                  if (bustT > 2f) { cash = (cash * .8f).toInt(); respawn(); say("BUSTED! Lost 20% cash"); return }
+                  for (i in bu.indices.reversed()) {
+                      val b = bu[i]; b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt
+                      var hit = b.life <= 0f || solid(b.x, b.y)
+                      if (!hit) {
+                          if (b.mine) {
+                              for (pd in peds) if (pd.hp > 0f && hypot(pd.x - b.x, pd.y - b.y) < 9f) {
+                                  pd.hp -= b.dmg; hit = true
+                                  if (pd.hp <= 0f) { cash += 20 + rnd.nextInt(40); wanted(1) }
+                                  break
+                              }
+                              if (!hit) for (c in cars) if (c.kind == 1 && c !== car && hypot(c.x - b.x, c.y - b.y) < 20f) {
+                                  c.hp -= b.dmg; hit = true; wanted(2)
+                                  if (c.hp <= 0f) { cash += 100; stars = min(5, stars + 1); say("Police car destroyed +\$100") }
+                                  break
+                              }
+                          } else if (hypot(px - b.x, py - b.y) < 12f) {
+                              if (cc != null) cc.hp -= b.dmg * .5f else php -= b.dmg
+                              hit = true
+                          }
+                      }
+                      if (hit) bu.removeAt(i)
+                  }
+                  peds.removeAll { it.hp <= 0f }
+                  cars.removeAll { it.hp <= 0f && it !== car }
+                  if (cc != null && cc.hp <= 0f) { cars.remove(cc); car = null; php -= 40f; say("Car destroyed!") }
+                  if (cars.count { it.kind == 0 } < 24 && rnd.nextInt(60) == 0) { val n = newCiv(); if (hypot(n.x - px, n.y - py) > 700f) cars.add(n) }
+                  if (peds.size < 45 && rnd.nextInt(60) == 0) { val n = newPed(); if (hypot(n.x - px, n.y - py) > 500f) peds.add(n) }
+                  if (php <= 0f) { wastedT = 3f; car = null }
+              }
+
+              private fun drive(c: Car, dt: Float) {
+                  val thr = -ly
+                  c.spd = (c.spd + thr * 240f * dt - c.spd * .6f * dt).coerceIn(-90f, 280f)
+                  c.ang += lx * 2.3f * dt * (c.spd / 150f).coerceIn(-1f, 1f)
+                  val b = mv(c.x, c.y, cos(c.ang) * c.spd * dt, sin(c.ang) * c.spd * dt, 15f)
+                  if (b) { c.hp -= abs(c.spd) * .06f; c.spd *= -.3f }
+                  c.x = tmp[0]; c.y = tmp[1]; px = c.x; py = c.y
+                  for (o in cars) if (o !== c && hypot(o.x - c.x, o.y - c.y) < 28f) {
+                      val rel = abs(c.spd - o.spd)
+                      o.hp -= rel * .08f; c.hp -= rel * .04f; c.spd *= .5f; o.spd *= .5f
+                      o.x += cos(c.ang) * 6f; o.y += sin(c.ang) * 6f
+                  }
+                  for (pd in peds) if (pd.hp > 0f && abs(c.spd) > 70f && hypot(pd.x - c.x, pd.y - c.y) < 20f) { pd.hp = 0f; cash += 15; wanted(1) }
+              }
+
+              private fun civ(c: Car, dt: Float) {
+                  val fx = c.x + cos(c.ang) * 50f; val fy = c.y + sin(c.ang) * 50f
+                  var stop = hypot(px - fx, py - fy) < 32f
+                  if (!stop) for (o in cars) if (o !== c && hypot(o.x - fx, o.y - fy) < 32f) { stop = true; break }
+                  if (!stop) for (pd in peds) if (hypot(pd.x - fx, pd.y - fy) < 24f) { stop = true; break }
+                  if (stop) c.cd += dt else c.cd = 0f
+                  if (c.cd > 3f) { stop = false; if (c.cd > 4.5f) c.cd = 0f }
+                  c.spd = if (stop) max(0f, c.spd - 400f * dt) else min(105f, c.spd + 100f * dt)
+                  c.x += cos(c.ang) * c.spd * dt; c.y += sin(c.ang) * c.spd * dt
+                  if (c.x < 20f) c.x = WORLD - 20f; if (c.x > WORLD - 20f) c.x = 20f
+                  if (c.y < 20f) c.y = WORLD - 20f; if (c.y > WORLD - 20f) c.y = 20f
+              }
+
+              private fun police(c: Car, dt: Float) {
+                  val want = atan2(py - c.y, px - c.x)
+                  if (c.cd > 0f) c.cd -= dt else c.ang = want
+                  val near = hypot(px - c.x, py - c.y) < 45f
+                  val b = mv(c.x, c.y, cos(c.ang) * 190f * dt * (if (near) 0f else 1f), sin(c.ang) * 190f * dt * (if (near) 0f else 1f), 16f)
+                  c.x = tmp[0]; c.y = tmp[1]
+                  if (b && c.cd <= 0f) { c.ang = want + (if (rnd.nextBoolean()) 1.57f else -1.57f); c.cd = .6f }
+              }
+
+              private fun ped(pd: Ped, dt: Float) {
+                  pd.t -= dt; if (pd.flee > 0f) pd.flee -= dt
+                  if (pd.t <= 0f) {
+                      pd.t = 1f + rnd.nextFloat() * 3f
+                      val a = if (pd.flee > 0f) atan2(pd.y - py, pd.x - px) else rnd.nextFloat() * 6.283f
+                      val s = if (pd.flee > 0f) 75f else 22f
+                      pd.vx = cos(a) * s; pd.vy = sin(a) * s
+                  }
+                  val b = mv(pd.x, pd.y, pd.vx * dt, pd.vy * dt, 5f); pd.x = tmp[0]; pd.y = tmp[1]; if (b) pd.t = 0f
+              }
+
+              private fun norm(dx: Float, dy: Float): FloatArray {
+                  val l = hypot(dx, dy); val s = if (l > 60f) 60f / l else 1f
+                  return floatArrayOf(dx * s / 60f, dy * s / 60f)
+              }
+
+              override fun onTouchEvent(e: MotionEvent): Boolean {
+                  val a = e.actionMasked; val i = e.actionIndex
+                  when (a) {
+                      MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                          val id = e.getPointerId(i); val x = e.getX(i) / d; val y = e.getY(i) / d
+                          if (wastedT > 0f) return true
+                          if (hypot(x - (W - 70f), y - (H - 70f)) < 50f) { fId = id; fire = true }
+                          else if (hypot(x - (W - 165f), y - (H - 45f)) < 42f) act()
+                          else if (x < W * .5f && lId == -1) { lId = id; lcx = x; lcy = y }
+                      }
+                      MotionEvent.ACTION_MOVE -> for (k in 0 until e.pointerCount) {
+                          if (e.getPointerId(k) == lId) { val v = norm(e.getX(k) / d - lcx, e.getY(k) / d - lcy); lx = v[0]; ly = v[1] }
+                      }
+                      MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
+                          val id = e.getPointerId(i)
+                          if (id == lId) { lId = -1; lx = 0f; ly = 0f }
+                          if (id == fId) { fId = -1; fire = false }
+                      }
+                  }
+                  return true
+              }
+
+              private fun txt(cv: Canvas, s: String, x: Float, y: Float, size: Float, col: Int, al: Paint.Align) {
+                  p.style = Paint.Style.FILL; p.color = col; p.textSize = size; p.textAlign = al; cv.drawText(s, x, y, p)
+              }
+
+              private fun drawCar(cv: Canvas, c: Car) {
+                  cv.save(); cv.translate(c.x, c.y); cv.rotate(c.ang * 57.2958f)
+                  p.style = Paint.Style.FILL; p.color = if (c.kind == 1) Color.WHITE else c.col
+                  cv.drawRect(-18f, -9f, 18f, 9f, p)
+                  p.color = Color.argb(170, 170, 210, 255); cv.drawRect(2f, -7f, 12f, 7f, p)
+                  if (c.kind == 1) { p.color = if ((time * 6f).toInt() % 2 == 0) Color.RED else Color.BLUE; cv.drawRect(-5f, -7f, 1f, 7f, p) }
+                  cv.restore()
+              }
+
+              override fun onDraw(cv: Canvas) {
+                  W = width / d; H = height / d
+                  val now = System.nanoTime(); val dt = ((now - last) / 1e9f).coerceAtMost(.05f); last = now
+                  update(dt)
+                  cv.save(); cv.scale(d, d)
+                  cv.drawColor(Color.rgb(15, 20, 25))
+                  val cx = px - W / 2; val cy = py - H / 2
+                  cv.save(); cv.translate(-cx, -cy)
+                  p.style = Paint.Style.FILL
+                  for (i in max(0, (cx / CELL).toInt())..min(9, ((cx + W) / CELL).toInt())) for (j in max(0, (cy / CELL).toInt())..min(9, ((cy + H) / CELL).toInt())) {
+                      val x0 = i * CELL; val y0 = j * CELL
+                      p.color = Color.rgb(60, 62, 68); cv.drawRect(x0, y0, x0 + CELL, y0 + CELL, p)
+                      p.color = Color.rgb(150, 150, 145); cv.drawRect(x0 + 120f, y0 + 120f, x0 + CELL, y0 + CELL, p)
+                      p.color = bcol[(i * 7 + j * 13) % 5]; cv.drawRect(x0 + 150f, y0 + 150f, x0 + 370f, y0 + 370f, p)
+                      p.color = Color.argb(70, 0, 0, 0); cv.drawRect(x0 + 175f, y0 + 175f, x0 + 345f, y0 + 345f, p)
+                      p.color = Color.rgb(230, 200, 60)
+                      cv.drawRect(x0 + 120f, y0 + 58f, x0 + CELL, y0 + 62f, p); cv.drawRect(x0 + 58f, y0 + 120f, x0 + 62f, y0 + CELL, p)
+                  }
+                  for (pd in peds) { p.color = Color.rgb(240, 200, 160); cv.drawCircle(pd.x, pd.y, 5f, p) }
+                  for (c in cars) drawCar(cv, c)
+                  p.color = Color.YELLOW
+                  for (b in bu) { p.color = if (b.mine) Color.YELLOW else Color.rgb(255, 90, 60); cv.drawCircle(b.x, b.y, 2.5f, p) }
+                  if (car == null && wastedT <= 0f) {
+                      p.color = Color.CYAN; cv.drawCircle(px, py, 8f, p)
+                      p.style = Paint.Style.STROKE; p.strokeWidth = 3f; p.color = Color.WHITE
+                      cv.drawLine(px, py, px + cos(pang) * 16f, py + sin(pang) * 16f, p); p.style = Paint.Style.FILL
+                  }
+                  cv.restore()
+                  // HUD
+                  txt(cv, "\$$cash", 14f, 26f, 20f, Color.rgb(120, 230, 120), Paint.Align.LEFT)
+                  for (k in 0 until 5) {
+                      val on = k < stars && !(clearT > 0f && (time * 4f).toInt() % 2 == 0)
+                      txt(cv, "\u2605", W / 2 - 60f + k * 26f, 28f, 26f, if (on) Color.YELLOW else Color.GRAY, Paint.Align.LEFT)
+                  }
+                  val cc = car; val hpv = if (cc != null) cc.hp else php
+                  p.style = Paint.Style.FILL; p.color = Color.argb(160, 0, 0, 0); cv.drawRect(W / 2 - 62f, 38f, W / 2 + 62f, 50f, p)
+                  p.color = if (cc != null) Color.rgb(80, 160, 255) else Color.rgb(60, 200, 80)
+                  cv.drawRect(W / 2 - 60f, 40f, W / 2 - 60f + 120f * max(0f, hpv) / 100f, 48f, p)
+                  if (msgT > 0f) txt(cv, msg, W / 2, 72f, 16f, Color.WHITE, Paint.Align.CENTER)
+                  val mx = 70f; val my = 110f; val mr = 55f; val s = mr / 450f
+                  cv.save(); path.reset(); path.addCircle(mx, my, mr, Path.Direction.CW); cv.clipPath(path)
+                  p.color = Color.rgb(30, 60, 40); cv.drawCircle(mx, my, mr, p); p.color = Color.rgb(95, 95, 100)
+                  for (k in 0..10) {
+                      val yy = my + (k * CELL + 60f - py) * s; cv.drawRect(mx - mr, yy - 60f * s, mx + mr, yy + 60f * s, p)
+                      val xx = mx + (k * CELL + 60f - px) * s; cv.drawRect(xx - 60f * s, my - mr, xx + 60f * s, my + mr, p)
+                  }
+                  for (c in cars) if (c.kind == 1) { p.color = if ((time * 6f).toInt() % 2 == 0) Color.RED else Color.BLUE; cv.drawCircle(mx + (c.x - px) * s, my + (c.y - py) * s, 3f, p) }
+                  cv.restore()
+                  p.color = Color.WHITE; cv.drawCircle(mx, my, 4f, p)
+                  p.style = Paint.Style.STROKE; p.strokeWidth = 2f; cv.drawCircle(mx, my, mr, p)
+                  if (lId != -1) { p.color = Color.argb(120, 255, 255, 255); cv.drawCircle(lcx, lcy, 50f, p) }
+                  p.style = Paint.Style.FILL
+                  p.color = if (cc == null) Color.argb(150, 220, 40, 40) else Color.argb(80, 120, 120, 120); cv.drawCircle(W - 70f, H - 70f, 42f, p)
+                  p.color = Color.argb(150, 40, 100, 220); cv.drawCircle(W - 165f, H - 45f, 34f, p)
+                  txt(cv, "FIRE", W - 70f, H - 64f, 16f, Color.WHITE, Paint.Align.CENTER)
+                  txt(cv, if (cc == null) "ENTER" else "EXIT", W - 165f, H - 40f, 14f, Color.WHITE, Paint.Align.CENTER)
+                  if (wastedT > 0f) {
+                      p.style = Paint.Style.FILL; p.color = Color.argb(150, 0, 0, 0); cv.drawRect(0f, 0f, W, H, p)
+                      txt(cv, "WASTED", W / 2, H / 2 + 14f, 52f, Color.RED, Paint.Align.CENTER)
+                  }
+                  cv.restore()
+                  postInvalidateOnAnimation()
+              }
+          }
+          EOF2
+          mkdir -p $(dirname app/src/main/java/com/zone/gta/MainActivity.kt)
+          cat > app/src/main/java/com/zone/gta/MainActivity.kt <<'EOF3'
+          package com.zone.gta
+
+          import android.app.Activity
+          import android.os.Bundle
+
+          class MainActivity : Activity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  setContentView(GView(this))
+              }
+          }
+          EOF3
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF4'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF4
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF5'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "ViceZone"
+          include(":app")
+          EOF5
+          printf "android.useAndroidX=true\norg.gradle.jvmargs=-Xmx3g\n" > gradle.properties
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - run: cd gta && gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ViceZone-apk
+          path: gta/app/build/outputs/apk/debug/app-debug.apk
