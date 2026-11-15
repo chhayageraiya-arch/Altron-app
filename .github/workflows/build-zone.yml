@@ -1,0 +1,393 @@
+name: Build Zone Game
+on: [workflow_dispatch, push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create project
+        run: |
+          mkdir -p zone && cd zone
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF0'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.zone.game"
+              compileSdk = 34
+              defaultConfig { applicationId = "com.zone.game"; minSdk = 24; targetSdk = 34; versionCode = 1; versionName = "1.0" }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF0
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF1'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="Zone Battle" android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
+                  <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="sensorLandscape">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF1
+          mkdir -p $(dirname app/src/main/java/com/zone/game/GameView.kt)
+          cat > app/src/main/java/com/zone/game/GameView.kt <<'EOF2'
+          package com.zone.game
+
+          import android.content.Context
+          import android.graphics.*
+          import android.view.MotionEvent
+          import android.view.View
+          import java.util.Random
+          import kotlin.math.*
+
+          class P(var x: Float, var y: Float, val team: Int, val bot: Boolean) {
+              var hp = 100f; var gun = 0; var cd = 0f; var ang = 0f; var alive = true; var kills = 0
+              var tx = x; var ty = y; var think = 0f; var tgt: P? = null
+          }
+          class B(var x: Float, var y: Float, val vx: Float, val vy: Float, val dmg: Float, val owner: P, var life: Float)
+          class Z(val x: Float, val y: Float, val r: Float, val danger: Boolean, var t: Float)
+
+          class GameView(c: Context) : View(c) {
+              private val d = resources.displayMetrics.density
+              private val sp = c.getSharedPreferences("zone", Context.MODE_PRIVATE)
+              private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val rnd = Random()
+              private val WORLD = 3000f
+              private val gunN = arrayOf("Pistol", "SMG", "Rifle", "Sniper")
+              private val gunD = floatArrayOf(12f, 7f, 14f, 60f)
+              private val gunR = floatArrayOf(.35f, .09f, .16f, .9f)
+              private val gunS = floatArrayOf(600f, 650f, 750f, 1100f)
+              private val gunL = floatArrayOf(.6f, .5f, .8f, 1f)
+              private val gunSp = floatArrayOf(.05f, .12f, .06f, .01f)
+              private val locN = arrayOf("Skull Harbor", "Fog Village", "Lighthouse", "Ship Graveyard", "Triangle Peak", "Mist Airfield", "Reef Town", "Shipwreck Bay")
+              private val locX = floatArrayOf(600f, 1500f, 2400f, 500f, 1500f, 2500f, 800f, 2000f)
+              private val locY = floatArrayOf(600f, 500f, 700f, 1500f, 1500f, 1600f, 2400f, 2400f)
+              private val modeN = arrayOf("Battle Royale 50", "Squad 4v4", "Duel 1v1", "Duo 2v2")
+              private val counts = intArrayOf(50, 8, 2, 4)
+              private val rad = floatArrayOf(1500f, 800f, 500f, 600f)
+              private val skins = intArrayOf(Color.CYAN, Color.GREEN, Color.MAGENTA, Color.YELLOW)
+
+              private var state = 0
+              private var mode = 0
+              private var coins = sp.getInt("coins", 0)
+              private var skin = sp.getInt("skin", 0)
+              private val ps = ArrayList<P>()
+              private val bl = ArrayList<B>()
+              private val zones = ArrayList<Z>()
+              private val vend = ArrayList<FloatArray>()
+              private val loot = ArrayList<FloatArray>()
+              private lateinit var me: P
+              private var zx = 1500f; private var zy = 1500f; private var zr = 1500f
+              private var zx0 = 1500f; private var zy0 = 1500f; private var zx1 = 1500f; private var zy1 = 1500f
+              private var zFrom = 1500f; private var zTarget = 1500f; private var phase = 0; private var zt = 0f
+              private var msg = ""; private var msgT = 0f; private var earned = 0; private var rank = 0
+              private var last = System.nanoTime()
+              private var lId = -1; private var rId = -1
+              private var lcx = 0f; private var lcy = 0f; private var rcx = 0f; private var rcy = 0f
+              private var lx = 0f; private var ly = 0f; private var rx = 0f; private var ry = 0f
+              private var W = 800f; private var H = 360f
+
+              private fun rpos(): FloatArray {
+                  val a = rnd.nextFloat() * 6.283f; val r = rnd.nextFloat() * (rad[mode] - 60f)
+                  return floatArrayOf(1500f + cos(a) * r, 1500f + sin(a) * r)
+              }
+
+              private fun start() {
+                  ps.clear(); bl.clear(); zones.clear(); vend.clear(); loot.clear()
+                  lId = -1; rId = -1; lx = 0f; ly = 0f; rx = 0f; ry = 0f
+                  val n = counts[mode]; val ts = if (mode == 0) 1 else n / 2
+                  for (i in 0 until n) {
+                      val s = rpos()
+                      val a = P(s[0], s[1], if (mode == 0) i else i / ts, i != 0)
+                      if (a.bot) a.gun = rnd.nextInt(2)
+                      ps.add(a)
+                  }
+                  me = ps[0]
+                  for (i in 0 until 14) { val s = rpos(); vend.add(floatArrayOf(s[0], s[1], 0f)) }
+                  for (i in 0 until 70) { val s = rpos(); loot.add(floatArrayOf(s[0], s[1], (1 + rnd.nextInt(3)).toFloat())) }
+                  zx = 1500f; zy = 1500f; zr = rad[mode]; zx0 = zx; zy0 = zy; zx1 = zx; zy1 = zy
+                  zFrom = zr; zTarget = zr; phase = 0; zt = 0f
+                  msg = "Zone shrinks every 60s"; msgT = 3f
+                  state = 1
+              }
+
+              private fun end(win: Boolean) {
+                  if (state != 1) return
+                  state = 2
+                  rank = if (win) 1 else ps.count { it.alive } + 1
+                  earned = me.kills * 10 + (if (win) 100 else max(0, 30 - rank))
+                  coins += earned; sp.edit().putInt("coins", coins).apply()
+                  msg = if (win) "VICTORY!" else "You died - Rank #$rank"
+              }
+
+              private fun kill(o: P, by: P?) {
+                  if (!o.alive || state != 1) return
+                  o.alive = false
+                  if (by != null) by.kills++
+                  if (o === me) end(false) else if (ps.none { it.alive && it.team != me.team }) end(true)
+              }
+
+              private fun shoot(a: P) {
+                  val g = a.gun; a.cd = gunR[g]
+                  val ang = a.ang + (rnd.nextFloat() - .5f) * gunSp[g] * 2f
+                  bl.add(B(a.x + cos(ang) * 18f, a.y + sin(ang) * 18f, cos(ang) * gunS[g], sin(ang) * gunS[g],
+                      gunD[g] * (if (a.bot) .7f else 1f), a, gunL[g]))
+              }
+
+              private fun nextPhase() {
+                  phase++; zFrom = zr; zx0 = zx; zy0 = zy
+                  zTarget = max(50f, zr * 0.62f)
+                  val a = rnd.nextFloat() * 6.283f; val o = rnd.nextFloat() * (zr - zTarget)
+                  zx1 = zx + cos(a) * o; zy1 = zy + sin(a) * o
+                  for (k in 0 until 3) {
+                      val b = rnd.nextFloat() * 6.283f; val rr = rnd.nextFloat() * zr * .8f
+                      zones.add(Z(zx + cos(b) * rr, zy + sin(b) * rr, 120f + rnd.nextFloat() * 80f, k == 2, 55f))
+                  }
+                  msg = "Zone shrinking! Poison and danger zones appeared"; msgT = 3f
+              }
+
+              private fun update(dt: Float) {
+                  zt += dt
+                  if (zt >= 60f) { zt = 0f; nextPhase() }
+                  if (phase > 0) {
+                      val q = min(1f, zt / 20f)
+                      zr = zFrom + (zTarget - zFrom) * q; zx = zx0 + (zx1 - zx0) * q; zy = zy0 + (zy1 - zy0) * q
+                  }
+                  msgT -= dt
+                  for (i in zones.indices.reversed()) { zones[i].t -= dt; if (zones[i].t <= 0f) zones.removeAt(i) }
+                  for (v in vend) if (v[2] > 0f) v[2] -= dt
+                  for (a in ps) {
+                      if (!a.alive) continue
+                      a.cd -= dt
+                      if (a.bot) bot(a, dt) else {
+                          a.x += lx * 115f * dt; a.y += ly * 115f * dt
+                          if (rId != -1) { if (hypot(rx, ry) > .15f) a.ang = atan2(ry, rx); if (a.cd <= 0f) shoot(a) }
+                      }
+                      a.x = a.x.coerceIn(0f, WORLD); a.y = a.y.coerceIn(0f, WORLD)
+                      if (hypot(a.x - zx, a.y - zy) > zr) a.hp -= (4f + phase * 2f) * dt
+                      for (z in zones) if (hypot(a.x - z.x, a.y - z.y) < z.r) a.hp -= (if (z.danger) 14f else 6f) * dt
+                      for (v in vend) if (v[2] <= 0f && a.hp < 100f && hypot(v[0] - a.x, v[1] - a.y) < 40f) {
+                          a.hp = min(100f, a.hp + 50f); v[2] = 40f
+                          if (a === me) { msg = "Vending machine: +50 HP"; msgT = 2f }
+                      }
+                      for (i in loot.indices.reversed()) {
+                          val l = loot[i]
+                          if (l[2].toInt() > a.gun && hypot(l[0] - a.x, l[1] - a.y) < 24f) {
+                              a.gun = l[2].toInt(); loot.removeAt(i)
+                              if (a === me) { msg = "Picked up ${gunN[a.gun]}"; msgT = 2f }
+                          }
+                      }
+                      if (a.hp <= 0f) kill(a, null)
+                  }
+                  for (i in bl.indices.reversed()) {
+                      val b = bl[i]; b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt
+                      var hit = false
+                      if (b.life > 0f) for (o in ps) {
+                          if (o.alive && o.team != b.owner.team && abs(o.x - b.x) < 14f && abs(o.y - b.y) < 14f) {
+                              o.hp -= b.dmg; hit = true
+                              if (o.hp <= 0f) kill(o, b.owner)
+                              break
+                          }
+                      }
+                      if (hit || b.life <= 0f) bl.removeAt(i)
+                  }
+              }
+
+              private fun bot(a: P, dt: Float) {
+                  a.think -= dt
+                  if (a.think <= 0f) {
+                      a.think = .5f + rnd.nextFloat()
+                      var best: P? = null; var bd = 1e9f
+                      for (o in ps) if (o.alive && o.team != a.team) {
+                          val dd = hypot(o.x - a.x, o.y - a.y); if (dd < bd) { bd = dd; best = o }
+                      }
+                      a.tgt = best
+                  }
+                  var mx = 0f; var my = 0f
+                  val t = a.tgt
+                  if (hypot(zx - a.x, zy - a.y) > zr - 40f) { mx = zx - a.x; my = zy - a.y }
+                  else if (t != null && t.alive && hypot(t.x - a.x, t.y - a.y) < 380f) {
+                      val dx = t.x - a.x; val dy = t.y - a.y
+                      a.ang = atan2(dy, dx) + (rnd.nextFloat() - .5f) * .3f
+                      if (hypot(dx, dy) > 180f) { mx = dx; my = dy }
+                      if (a.cd <= 0f) shoot(a)
+                  } else {
+                      mx = a.tx - a.x; my = a.ty - a.y
+                      if (hypot(mx, my) < 30f) { a.tx = zx + (rnd.nextFloat() - .5f) * zr * 1.4f; a.ty = zy + (rnd.nextFloat() - .5f) * zr * 1.4f }
+                  }
+                  val ml = hypot(mx, my)
+                  if (ml > 1f) { a.x += mx / ml * 100f * dt; a.y += my / ml * 100f * dt }
+              }
+
+              private fun norm(dx: Float, dy: Float): FloatArray {
+                  val l = hypot(dx, dy); val s = if (l > 60f) 60f / l else 1f
+                  return floatArrayOf(dx * s / 60f, dy * s / 60f)
+              }
+
+              private fun mrect(i: Int): RectF { val l = W / 2 - 270f + (i % 2) * 280f; val t = 100f + (i / 2) * 70f; return RectF(l, t, l + 260f, t + 56f) }
+              private fun srect() = RectF(W / 2 - 130f, 250f, W / 2 + 130f, 298f)
+
+              private fun tap(x: Float, y: Float) {
+                  if (state == 2) { state = 0; return }
+                  for (i in 0..3) if (mrect(i).contains(x, y)) { mode = i; start(); return }
+                  if (srect().contains(x, y) && coins >= 50) {
+                      skin = (skin + 1) % skins.size; coins -= 50
+                      sp.edit().putInt("coins", coins).putInt("skin", skin).apply()
+                  }
+              }
+
+              override fun onTouchEvent(e: MotionEvent): Boolean {
+                  val act = e.actionMasked; val i = e.actionIndex
+                  if (state != 1) { if (act == MotionEvent.ACTION_DOWN) tap(e.x / d, e.y / d); return true }
+                  when (act) {
+                      MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                          val id = e.getPointerId(i); val x = e.getX(i) / d; val y = e.getY(i) / d
+                          if (x < W / 2 && lId == -1) { lId = id; lcx = x; lcy = y }
+                          else if (x >= W / 2 && rId == -1) { rId = id; rcx = x; rcy = y }
+                      }
+                      MotionEvent.ACTION_MOVE -> for (k in 0 until e.pointerCount) {
+                          val id = e.getPointerId(k); val x = e.getX(k) / d; val y = e.getY(k) / d
+                          if (id == lId) { val v = norm(x - lcx, y - lcy); lx = v[0]; ly = v[1] }
+                          if (id == rId) { val v = norm(x - rcx, y - rcy); rx = v[0]; ry = v[1] }
+                      }
+                      MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
+                          val id = e.getPointerId(i)
+                          if (id == lId) { lId = -1; lx = 0f; ly = 0f }
+                          if (id == rId) { rId = -1; rx = 0f; ry = 0f }
+                      }
+                  }
+                  return true
+              }
+
+              private fun txt(cv: Canvas, s: String, x: Float, y: Float, size: Float, col: Int, al: Paint.Align) {
+                  p.style = Paint.Style.FILL; p.color = col; p.textSize = size; p.textAlign = al; cv.drawText(s, x, y, p)
+              }
+
+              override fun onDraw(cv: Canvas) {
+                  W = width / d; H = height / d
+                  val now = System.nanoTime(); val dt = ((now - last) / 1e9f).coerceAtMost(.05f); last = now
+                  cv.save(); cv.scale(d, d)
+                  when (state) {
+                      0 -> drawLobby(cv)
+                      1 -> { update(dt); drawGame(cv) }
+                      else -> {
+                          cv.drawColor(Color.rgb(10, 25, 45))
+                          txt(cv, msg, W / 2, H * .35f, 34f, Color.WHITE, Paint.Align.CENTER)
+                          txt(cv, "Kills: ${me.kills}    Coins +$earned", W / 2, H * .35f + 44f, 20f, Color.YELLOW, Paint.Align.CENTER)
+                          txt(cv, "Tap to continue", W / 2, H * .35f + 86f, 18f, Color.LTGRAY, Paint.Align.CENTER)
+                      }
+                  }
+                  cv.restore()
+                  postInvalidateOnAnimation()
+              }
+
+              private fun drawLobby(cv: Canvas) {
+                  cv.drawColor(Color.rgb(10, 25, 45))
+                  txt(cv, "BERMUDA TRIANGLE", W / 2, 46f, 30f, Color.WHITE, Paint.Align.CENTER)
+                  txt(cv, "Coins: $coins", W / 2, 76f, 18f, Color.YELLOW, Paint.Align.CENTER)
+                  for (i in 0..3) {
+                      val r = mrect(i); p.style = Paint.Style.FILL; p.color = Color.rgb(30, 90, 140)
+                      cv.drawRoundRect(r, 12f, 12f, p)
+                      txt(cv, modeN[i], r.centerX(), r.centerY() + 7f, 20f, Color.WHITE, Paint.Align.CENTER)
+                  }
+                  val s = srect(); p.style = Paint.Style.FILL; p.color = Color.rgb(90, 60, 140)
+                  cv.drawRoundRect(s, 12f, 12f, p)
+                  p.color = skins[skin]; cv.drawCircle(s.left + 28f, s.centerY(), 12f, p)
+                  txt(cv, "Change skin (50 coins)", s.centerX() + 14f, s.centerY() + 6f, 17f, Color.WHITE, Paint.Align.CENTER)
+                  txt(cv, "Offline - play vs bots", W / 2, 335f, 14f, Color.GRAY, Paint.Align.CENTER)
+              }
+
+              private fun drawGame(cv: Canvas) {
+                  cv.drawColor(Color.rgb(20, 70, 110))
+                  cv.save(); cv.translate(W / 2 - me.x, H / 2 - me.y)
+                  p.style = Paint.Style.FILL; p.color = Color.rgb(60, 120, 60); cv.drawRect(0f, 0f, WORLD, WORLD, p)
+                  p.style = Paint.Style.STROKE; p.strokeWidth = 2f; p.color = Color.rgb(52, 105, 52)
+                  for (i in 0..30) { cv.drawLine(i * 100f, 0f, i * 100f, WORLD, p); cv.drawLine(0f, i * 100f, WORLD, i * 100f, p) }
+                  p.style = Paint.Style.FILL
+                  for (k in locN.indices) {
+                      p.color = Color.rgb(125, 112, 100)
+                      for (j in 0 until 6) {
+                          val ox = locX[k] + ((j * 53) % 160 - 80); val oy = locY[k] + ((j * 97) % 160 - 80)
+                          cv.drawRect(ox, oy, ox + 46f, oy + 38f, p)
+                      }
+                      txt(cv, locN[k], locX[k], locY[k] - 100f, 16f, Color.WHITE, Paint.Align.CENTER)
+                  }
+                  for (v in vend) { p.color = if (v[2] > 0f) Color.GRAY else Color.rgb(40, 140, 255); cv.drawRect(v[0] - 8f, v[1] - 12f, v[0] + 8f, v[1] + 12f, p) }
+                  for (l in loot) { p.color = intArrayOf(Color.WHITE, Color.GREEN, Color.CYAN, Color.rgb(255, 150, 0))[l[2].toInt()]; cv.drawCircle(l[0], l[1], 6f, p) }
+                  for (z in zones) { p.color = if (z.danger) Color.argb(90, 255, 30, 30) else Color.argb(90, 120, 40, 200); cv.drawCircle(z.x, z.y, z.r, p) }
+                  p.style = Paint.Style.STROKE; p.strokeWidth = 4000f; p.color = Color.argb(80, 200, 30, 30); cv.drawCircle(zx, zy, zr + 2000f, p)
+                  p.strokeWidth = 3f; p.color = Color.WHITE; cv.drawCircle(zx, zy, zr, p)
+                  if (phase >= 0 && zTarget < zr + 1f) { p.strokeWidth = 2f; p.color = Color.CYAN; cv.drawCircle(zx1, zy1, zTarget, p) }
+                  p.style = Paint.Style.FILL
+                  for (o in ps) if (o.alive) {
+                      p.color = if (o === me) skins[skin] else if (o.team == me.team) Color.rgb(80, 200, 255) else Color.rgb(220, 60, 60)
+                      cv.drawCircle(o.x, o.y, 12f, p)
+                      p.style = Paint.Style.STROKE; p.strokeWidth = 4f; p.color = Color.WHITE
+                      cv.drawLine(o.x, o.y, o.x + cos(o.ang) * 22f, o.y + sin(o.ang) * 22f, p)
+                      p.style = Paint.Style.FILL; p.color = Color.RED; cv.drawRect(o.x - 12f, o.y - 22f, o.x - 12f + 24f * o.hp / 100f, o.y - 19f, p)
+                  }
+                  p.color = Color.YELLOW
+                  for (b in bl) cv.drawCircle(b.x, b.y, 2.5f, p)
+                  cv.restore()
+                  // HUD
+                  txt(cv, "Alive: ${ps.count { it.alive }}   Kills: ${me.kills}", 14f, 26f, 18f, Color.WHITE, Paint.Align.LEFT)
+                  val tl = if (phase > 0 && zt < 20f) "Zone shrinking!" else "Next zone in ${(60f - zt).toInt()}s"
+                  txt(cv, tl, W / 2, 26f, 18f, Color.WHITE, Paint.Align.CENTER)
+                  p.color = Color.argb(160, 0, 0, 0); cv.drawRect(W / 2 - 82f, H - 30f, W / 2 + 82f, H - 12f, p)
+                  p.color = Color.rgb(60, 200, 80); cv.drawRect(W / 2 - 80f, H - 28f, W / 2 - 80f + 160f * max(0f, me.hp) / 100f, H - 14f, p)
+                  txt(cv, gunN[me.gun], W / 2, H - 36f, 14f, Color.WHITE, Paint.Align.CENTER)
+                  if (msgT > 0f) txt(cv, msg, W / 2, 56f, 16f, Color.YELLOW, Paint.Align.CENTER)
+                  val m = 80f; val mx = W - m - 10f; val my = 10f; val sc = m / WORLD
+                  p.style = Paint.Style.FILL; p.color = Color.argb(150, 20, 60, 30); cv.drawRect(mx, my, mx + m, my + m, p)
+                  p.style = Paint.Style.STROKE; p.strokeWidth = 1.5f; p.color = Color.WHITE; cv.drawCircle(mx + zx * sc, my + zy * sc, zr * sc, p)
+                  p.style = Paint.Style.FILL; p.color = Color.CYAN; cv.drawCircle(mx + me.x * sc, my + me.y * sc, 3f, p)
+                  p.style = Paint.Style.STROKE; p.strokeWidth = 2f; p.color = Color.argb(120, 255, 255, 255)
+                  if (lId != -1) cv.drawCircle(lcx, lcy, 50f, p)
+                  if (rId != -1) cv.drawCircle(rcx, rcy, 50f, p)
+              }
+          }
+          EOF2
+          mkdir -p $(dirname app/src/main/java/com/zone/game/MainActivity.kt)
+          cat > app/src/main/java/com/zone/game/MainActivity.kt <<'EOF3'
+          package com.zone.game
+
+          import android.app.Activity
+          import android.os.Bundle
+
+          class MainActivity : Activity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  setContentView(GameView(this))
+              }
+          }
+          EOF3
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF4'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF4
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF5'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "Zone"
+          include(":app")
+          EOF5
+          printf "android.useAndroidX=true\norg.gradle.jvmargs=-Xmx3g\n" > gradle.properties
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - run: cd zone && gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Zone-apk
+          path: zone/app/build/outputs/apk/debug/app-debug.apk
