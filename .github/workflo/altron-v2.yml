@@ -1,0 +1,224 @@
+name: Altron v2
+on: [workflow_dispatch, push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: unzip -q ./*.zip
+      - name: Apply v2 fixes
+        run: |
+          cat > Altron/app/src/main/java/com/altron/assistant/AltronService.kt <<'KT1'
+          package com.altron.assistant
+
+          import android.app.*
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.net.ConnectivityManager
+          import android.net.NetworkCapabilities
+          import android.os.*
+          import android.speech.*
+          import android.speech.tts.TextToSpeech
+          import android.speech.tts.UtteranceProgressListener
+          import android.widget.Toast
+          import java.util.Locale
+
+          class AltronService : Service() {
+              companion object {
+                  var instance: AltronService? = null
+                  val WAKE = Regex("(?i)\\b(?:[auoe]l+\\s?t[aeou]?\\s?r\\s?[aou]n|tron)\\b|अल्ट्रॉन|ऑल्ट्रॉन|अल्ट्रोन|अल्ट्रान|ऑल्ट्रोन")
+              }
+              private lateinit var tts: TextToSpeech
+              private var recognizer: SpeechRecognizer? = null
+              private lateinit var router: CommandRouter
+              private val main = Handler(Looper.getMainLooper())
+              private var speaking = false
+              private var ttsReady = false
+              private var talkNow = false
+              private var lastErr = -1
+
+              override fun onBind(i: Intent?): IBinder? = null
+
+              private fun toast(t: String) { Toast.makeText(this, t, Toast.LENGTH_SHORT).show() }
+
+              private fun online(): Boolean {
+                  val cm = getSystemService(ConnectivityManager::class.java)
+                  val c = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+                  return c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+              }
+
+              /** Button in app: next sentence is accepted without saying "Altron". */
+              fun talkNow() {
+                  talkNow = true
+                  if (ttsReady) tts.stop()
+                  speaking = false
+                  main.post { recognizer?.cancel(); listen() }
+                  toast("Boliye...")
+              }
+
+              override fun onCreate() {
+                  super.onCreate()
+                  instance = this
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(NotificationChannel("altron", "Altron", NotificationManager.IMPORTANCE_LOW))
+                  val n = Notification.Builder(this, "altron").setContentTitle("Altron is listening")
+                      .setSmallIcon(android.R.drawable.ic_btn_speak_now).build()
+                  if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                  else startForeground(1, n)
+
+                  if (!SpeechRecognizer.isRecognitionAvailable(this)) toast("Speech service nahi mila. Google speech update karo.")
+
+                  tts = TextToSpeech(this) {
+                      ttsReady = it == TextToSpeech.SUCCESS
+                      if (ttsReady) { tts.language = Locale.getDefault(); speak("Altron online") }
+                  }
+                  tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                      override fun onStart(id: String?) {}
+                      override fun onDone(id: String?) { speaking = false; main.post { listen() } }
+                      @Deprecated("") override fun onError(id: String?) { speaking = false; main.post { listen() } }
+                  })
+                  router = CommandRouter(this) { speak(it) }
+                  recognizer = SpeechRecognizer.createSpeechRecognizer(this).apply { setRecognitionListener(listener) }
+                  listen()
+              }
+
+              private fun speak(t: String) {
+                  if (!ttsReady) return
+                  speaking = true
+                  recognizer?.cancel()
+                  tts.speak(t, TextToSpeech.QUEUE_FLUSH, null, "u")
+              }
+
+              private fun listen() {
+                  if (speaking) return
+                  val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                      .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                      .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
+                      .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, !online())
+                      .putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+                  recognizer?.startListening(i)
+              }
+
+              private val listener = object : RecognitionListener {
+                  override fun onResults(r: Bundle?) {
+                      lastErr = -1
+                      val t = r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                      if (t != null) {
+                          toast("Suna: $t")
+                          val low = t.lowercase()
+                          if (WAKE.containsMatchIn(low) || talkNow || router.hasPending()) {
+                              talkNow = false
+                              val cmd = low.replace(WAKE, "").trim().trimStart(',', ' ')
+                              if (cmd.isEmpty()) { talkNow = true; speak("Haan, boliye") } else router.route(cmd)
+                          }
+                      }
+                      if (!speaking) main.postDelayed({ listen() }, 300)
+                  }
+                  override fun onError(e: Int) {
+                      val normal = e == SpeechRecognizer.ERROR_NO_MATCH || e == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
+                      if (!normal && e != lastErr) { lastErr = e; toast("Mic error $e") }
+                      if (e == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) recognizer?.cancel()
+                      if (!speaking) main.postDelayed({ listen() }, if (normal) 300 else 1500)
+                  }
+                  override fun onReadyForSpeech(p: Bundle?) {}
+                  override fun onBeginningOfSpeech() {}
+                  override fun onRmsChanged(v: Float) {}
+                  override fun onBufferReceived(b: ByteArray?) {}
+                  override fun onEndOfSpeech() {}
+                  override fun onPartialResults(p: Bundle?) {}
+                  override fun onEvent(t: Int, p: Bundle?) {}
+              }
+
+              override fun onDestroy() { instance = null; recognizer?.destroy(); tts.shutdown(); super.onDestroy() }
+          }
+          KT1
+          cat > Altron/app/src/main/java/com/altron/assistant/MainActivity.kt <<'KT2'
+          package com.altron.assistant
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val prefs = getSharedPreferences("altron", MODE_PRIVATE)
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 96, 48, 48) }
+                  val key = EditText(this).apply {
+                      hint = "Claude API key (optional, enables online mode)"
+                      setText(prefs.getString("api_key", ""))
+                  }
+                  fun btn(label: String, f: () -> Unit) = Button(this).apply { text = label; setOnClickListener { f() } }
+                  root.addView(key)
+                  root.addView(btn("1. Grant permissions") {
+                      requestPermissions(arrayOf(
+                          Manifest.permission.RECORD_AUDIO, Manifest.permission.SEND_SMS,
+                          Manifest.permission.CALL_PHONE, Manifest.permission.READ_CONTACTS,
+                          Manifest.permission.POST_NOTIFICATIONS), 1)
+                  })
+                  root.addView(btn("2. Enable Accessibility (Altron)") {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  })
+                  root.addView(btn("3. Start Altron") {
+                      prefs.edit().putString("api_key", key.text.toString().trim()).apply()
+                      startForegroundService(Intent(this, AltronService::class.java))
+                  })
+                  root.addView(btn("Tap & speak (test, bina Altron bole)") {
+                      val sv = AltronService.instance
+                      if (sv == null) Toast.makeText(this, "Pehle Start Altron dabao", Toast.LENGTH_SHORT).show() else sv.talkNow()
+                  })
+                  root.addView(btn("Stop Altron") { stopService(Intent(this, AltronService::class.java)) })
+                  setContentView(root)
+              }
+          }
+          KT2
+          cat > Altron/app/src/main/AndroidManifest.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+              <uses-permission android:name="android.permission.SEND_SMS"/>
+              <uses-permission android:name="android.permission.CALL_PHONE"/>
+              <uses-permission android:name="android.permission.READ_CONTACTS"/>
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="com.android.alarm.permission.SET_ALARM"/>
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>
+              <queries><intent><action android:name="android.speech.RecognitionService"/></intent></queries>
+              <application android:label="Altron" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".AltronService" android:exported="false" android:foregroundServiceType="microphone"/>
+                  <service android:name=".AltronAccessibilityService" android:exported="true"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>
+                      <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility_config"/>
+                  </service>
+              </application>
+          </manifest>
+          XML
+      - run: printf "android.useAndroidX=true\norg.gradle.jvmargs=-Xmx3g\n" > Altron/gradle.properties
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - run: cd Altron && gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Altron-v2-apk
+          path: Altron/app/build/outputs/apk/debug/app-debug.apk
