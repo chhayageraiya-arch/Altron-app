@@ -1,0 +1,621 @@
+name: Build City 3D
+on: [workflow_dispatch, push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create project
+        run: |
+          mkdir -p c3d && cd c3d
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF0'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.zone.city3d"
+              compileSdk = 34
+              defaultConfig { applicationId = "com.zone.city3d"; minSdk = 24; targetSdk = 34; versionCode = 1; versionName = "1.0" }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF0
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF1'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="Vice City 3D" android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
+                  <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="sensorLandscape">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF1
+          mkdir -p $(dirname app/src/main/java/com/zone/city3d/Game.kt)
+          cat > app/src/main/java/com/zone/city3d/Game.kt <<'EOF2'
+          package com.zone.city3d
+
+          import android.content.SharedPreferences
+          import java.util.Random
+          import java.util.concurrent.CopyOnWriteArrayList
+          import kotlin.math.*
+
+          class Car(var x: Float, var z: Float, var ang: Float, val kind: Int) {
+              var spd = 0f; var hp = 100f; var col = 0; var cd = 0f; var sh = 0f; var max = 8f; var own = false
+          }
+          class Ped(var x: Float, var z: Float) { var hp = 30f; var vx = 0f; var vz = 0f; var t = 0f; var flee = 0f; var col = 0; var ang = 0f }
+          class Bu(var x: Float, var z: Float, val vx: Float, val vz: Float, val dmg: Float, val mine: Boolean, var life: Float)
+
+          object G {
+              const val CELL = 60f; const val N = 8; const val WORLD = 480f
+              private val rnd = Random()
+              val cars = CopyOnWriteArrayList<Car>(); val peds = ArrayList<Ped>(); val bu = ArrayList<Bu>()
+              private val tmp = FloatArray(2)
+              var px = 68f; var pz = 100f; var pang = 0f; var php = 100f; var cash = 500
+              var car: Car? = null
+              var stars = 0; var clearT = 0f; private var spawnT = 0f; private var bustT = 0f
+              var wastedT = 0f; private var fireCd = 0f; var time = 0f; private var saveT = 0f
+              var msg = ""; var msgT = 0f
+              var lx = 0f; var ly = 0f; var yaw = 0f; var fire = false; var actReq = false
+              var shop = -1; var wpn = 0; var owned = 1; var shirt = 0; var hair = 0; var ownCars = 1
+              private var prefs: SharedPreferences? = null
+              val gunN = arrayOf("Pistol", "SMG", "Rifle", "Sniper")
+              private val gunD = floatArrayOf(12f, 7f, 14f, 60f)
+              private val gunR = floatArrayOf(.35f, .09f, .16f, .9f)
+              private val gunL = floatArrayOf(.7f, .6f, .9f, 1.2f)
+              private val gunP = intArrayOf(0, 500, 1200, 3000)
+              val shopN = arrayOf("Salon", "Weapon Shop", "Cloth Shop", "Garage", "Home")
+              val shopI = intArrayOf(1, 3, 5, 1, 4); val shopJ = intArrayOf(1, 1, 1, 4, 4)
+              val shopC = intArrayOf(0xFFE91E8C.toInt(), 0xFFE53935.toInt(), 0xFF1E88E5.toInt(), 0xFFFB8C00.toInt(), 0xFF43A047.toInt())
+              val shirtC = intArrayOf(0xFFE53935.toInt(), 0xFF1E88E5.toInt(), 0xFF43A047.toInt(), 0xFF212121.toInt(), 0xFFFFFFFF.toInt())
+              val hairC = intArrayOf(0xFF212121.toInt(), 0xFFF2D16B.toInt(), 0xFFC62828.toInt(), 0xFF1976D2.toInt())
+              private val carN = arrayOf("Sedan", "Sport car", "Truck"); private val carP = intArrayOf(0, 1500, 2500)
+              private val carMax = floatArrayOf(26f, 38f, 22f)
+              private val carCol = intArrayOf(0xFF90A4AE.toInt(), 0xFFFFD600.toInt(), 0xFF6D4C41.toInt())
+              fun doorX(k: Int) = shopI[k] * CELL + 18f
+              fun doorZ(k: Int) = shopJ[k] * CELL + 38f
+
+              fun init(p: SharedPreferences) {
+                  if (prefs != null) return
+                  prefs = p
+                  cash = p.getInt("cash", 500); px = p.getFloat("px", 68f); pz = p.getFloat("pz", 100f)
+                  owned = p.getInt("owned", 1); wpn = p.getInt("wpn", 0); shirt = p.getInt("shirt", 0)
+                  hair = p.getInt("hair", 0); ownCars = p.getInt("ownCars", 1)
+                  if (solid(px, pz)) { px = 68f; pz = 100f }
+                  repeat(24) { cars.add(newCiv()) }; repeat(45) { peds.add(newPed()) }
+              }
+              fun save() {
+                  prefs?.edit()?.putInt("cash", cash)?.putFloat("px", px)?.putFloat("pz", pz)?.putInt("owned", owned)
+                      ?.putInt("wpn", wpn)?.putInt("shirt", shirt)?.putInt("hair", hair)?.putInt("ownCars", ownCars)?.apply()
+              }
+              fun say(s: String) { msg = s; msgT = 2.5f }
+              private fun angDiff(a: Float, b: Float): Float {
+                  var d = (a - b) % 6.2832f
+                  if (d > 3.1416f) d -= 6.2832f
+                  if (d < -3.1416f) d += 6.2832f
+                  return d
+              }
+              fun solid(x: Float, z: Float): Boolean {
+                  if (x < 0f || z < 0f || x > WORLD || z > WORLD) return true
+                  val a = x % CELL; val b = z % CELL
+                  return a in 20f..56f && b in 20f..56f
+              }
+              private fun blk(x: Float, z: Float, r: Float) = solid(x - r, z - r) || solid(x + r, z - r) || solid(x - r, z + r) || solid(x + r, z + r)
+              private fun mv(x: Float, z: Float, dx: Float, dz: Float, r: Float): Boolean {
+                  var nx = x + dx; var nz = z; var b = false
+                  if (blk(nx, nz, r)) { nx = x; b = true }
+                  nz = z + dz
+                  if (blk(nx, nz, r)) { nz = z; b = true }
+                  tmp[0] = nx; tmp[1] = nz; return b
+              }
+              private fun roadPt(): FloatArray {
+                  val i = rnd.nextInt(N) * CELL + 8f; val t = rnd.nextFloat() * WORLD
+                  return if (rnd.nextBoolean()) floatArrayOf(t, i) else floatArrayOf(i, t)
+              }
+              private fun newCiv(): Car {
+                  val h = rnd.nextBoolean(); val i = rnd.nextInt(N); val t = 10f + rnd.nextFloat() * (WORLD - 20f)
+                  val fwd = rnd.nextBoolean(); val lane = if (fwd) 3.5f else -3.5f; val pi = PI.toFloat()
+                  val c = if (h) Car(t, i * CELL + 8f + lane, if (fwd) 0f else pi, 0)
+                  else Car(i * CELL + 8f + lane, t, if (fwd) pi / 2 else -pi / 2, 0)
+                  c.col = (0xFF000000.toInt()) or (rnd.nextInt(0xB0B0B0) + 0x303030); c.spd = 6f
+                  return c
+              }
+              private fun newPed(): Ped {
+                  val p = Ped(rnd.nextInt(N) * CELL + 18f, rnd.nextInt(N) * CELL + 20f + rnd.nextFloat() * 36f)
+                  p.col = shirtC[rnd.nextInt(5)]; return p
+              }
+              private fun wanted(n: Int) { stars = min(5, max(stars, n)); clearT = 0f; spawnT = min(spawnT, .3f) }
+              private fun respawn() {
+                  php = 100f; cash = (cash * .9f).toInt(); stars = 0; car = null; px = 68f; pz = 100f
+                  cars.removeIf { it.kind == 1 }; bu.clear()
+              }
+              fun nearShop(): Int {
+                  for (k in 0..4) if (hypot(px - doorX(k), pz - doorZ(k)) < 6f) return k
+                  return -1
+              }
+              fun act() {
+                  val c = car
+                  if (c != null) {
+                      for ((ox, oz) in listOf(3.5f to 0f, -3.5f to 0f, 0f to 3.5f, 0f to -3.5f))
+                          if (!blk(c.x + ox, c.z + oz, .6f)) { px = c.x + ox; pz = c.z + oz; break }
+                      c.spd = 0f; car = null
+                  } else {
+                      val k = nearShop()
+                      if (k >= 0) { shop = k; lx = 0f; ly = 0f; fire = false; return }
+                      var best: Car? = null; var bd = 5f
+                      for (o in cars) { val dd = hypot(o.x - px, o.z - pz); if (dd < bd) { bd = dd; best = o } }
+                      if (best != null) {
+                          car = best; best.spd = 0f; say("Left stick: gas and steer")
+                          if (best.kind == 1) wanted(3) else if (!best.own && peds.any { hypot(it.x - px, it.z - pz) < 25f }) wanted(1)
+                      }
+                  }
+              }
+
+              // ---- shops ----
+              private fun item(s: String, f: () -> Unit) = Pair(s, f)
+              private fun spend(c: Int): Boolean { if (cash >= c) { cash -= c; return true }; say("Not enough cash"); return false }
+              private fun garage(i: Int) {
+                  if ((ownCars and (1 shl i)) == 0) { if (!spend(carP[i])) return; ownCars = ownCars or (1 shl i) }
+                  cars.removeIf { it.own && it !== car }
+                  val c = Car(68f, doorZ(3), PI.toFloat() / 2, 0)
+                  c.own = true; c.col = carCol[i]; c.max = carMax[i]; cars.add(c); say("${carN[i]} is outside the garage")
+              }
+              fun shopItems(k: Int): List<Pair<String, () -> Unit>> {
+                  val l = ArrayList<Pair<String, () -> Unit>>()
+                  when (k) {
+                      0 -> for (i in hairC.indices) l.add(item("Hair style ${i + 1}  -  \$30") { if (spend(30)) { hair = i; say("Nice look!") } })
+                      1 -> for (i in 1..3) {
+                          val has = (owned and (1 shl i)) != 0
+                          l.add(item(if (has) "Equip ${gunN[i]}" else "Buy ${gunN[i]}  -  \$${gunP[i]}") {
+                              if (has) wpn = i else if (spend(gunP[i])) { owned = owned or (1 shl i); wpn = i; say("${gunN[i]} bought") }
+                          })
+                      }
+                      2 -> for (i in shirtC.indices) l.add(item("Shirt ${i + 1}  -  \$50") { if (spend(50)) shirt = i })
+                      3 -> for (i in 0..2) {
+                          val has = (ownCars and (1 shl i)) != 0
+                          l.add(item(if (has) "Take out ${carN[i]}" else "Buy ${carN[i]}  -  \$${carP[i]}") { garage(i) })
+                      }
+                      else -> {
+                          l.add(item("Rest (heal, clear wanted)") { php = 100f; stars = 0; say("Rested") })
+                          l.add(item("Save game") { save(); say("Game saved") })
+                      }
+                  }
+                  return l
+              }
+
+              private fun shootP() {
+                  fireCd = gunR[wpn]
+                  var tx = 0f; var tz = 0f; var bd = 50f; var found = false
+                  for (pd in peds) if (pd.hp > 0f) { val dd = hypot(pd.x - px, pd.z - pz); if (dd < bd) { bd = dd; tx = pd.x; tz = pd.z; found = true } }
+                  for (c in cars) if (c.kind == 1) { val dd = hypot(c.x - px, c.z - pz); if (dd < bd) { bd = dd; tx = c.x; tz = c.z; found = true } }
+                  var a = if (found) atan2(tz - pz, tx - px) else pang
+                  if (wpn == 1) a += (rnd.nextFloat() - .5f) * .08f
+                  pang = a
+                  bu.add(Bu(px + cos(a) * .8f, pz + sin(a) * .8f, cos(a) * 90f, sin(a) * 90f, gunD[wpn], true, gunL[wpn]))
+                  for (pd in peds) if (hypot(pd.x - px, pd.z - pz) < 45f) { pd.flee = 4f; pd.t = 0f }
+              }
+
+              fun update(dt: Float) {
+                  time += dt; msgT -= dt; fireCd -= dt; saveT += dt
+                  if (actReq) { actReq = false; if (wastedT <= 0f && shop < 0) act() }
+                  if (shop >= 0) return
+                  if (saveT > 8f) { saveT = 0f; save() }
+                  if (wastedT > 0f) { wastedT -= dt; if (wastedT <= 0f) respawn(); return }
+                  val cc = car
+                  if (cc != null) { drive(cc, dt); yaw += angDiff(cc.ang, yaw) * min(1f, 3f * dt) }
+                  else {
+                      if (hypot(lx, ly) > .1f) {
+                          val fx = cos(yaw); val fz = sin(yaw)
+                          val mx = fx * -ly - fz * lx; val mz = fz * -ly + fx * lx
+                          pang = atan2(mz, mx)
+                          mv(px, pz, mx * 6f * dt, mz * 6f * dt, .5f); px = tmp[0]; pz = tmp[1]
+                      }
+                      if (fire && fireCd <= 0f) shootP()
+                  }
+                  for (c in cars) if (c !== car && !c.own) { if (c.kind == 0) civ(c, dt) else police(c, dt) }
+                  for (pd in peds) ped(pd, dt)
+                  if (stars > 0) {
+                      val pc = cars.count { it.kind == 1 && it !== car }
+                      spawnT -= dt
+                      if (spawnT <= 0f && pc < min(8, stars * 2)) {
+                          spawnT = 1.5f; val s = roadPt()
+                          if (hypot(s[0] - px, s[1] - pz) in 80f..140f) cars.add(Car(s[0], s[1], 0f, 1))
+                      }
+                      val near = cars.any { it.kind == 1 && it !== car && hypot(it.x - px, it.z - pz) < 60f }
+                      if (near) clearT = 0f else { clearT += dt; if (clearT >= 8f) { stars--; clearT = 0f; say("Wanted level dropped") } }
+                  } else cars.removeIf { it.kind == 1 && it !== car }
+                  var arrest = false
+                  for (c in cars) if (c.kind == 1 && c !== car) {
+                      val dd = hypot(px - c.x, pz - c.z)
+                      if (stars >= 2 && dd < 45f) {
+                          c.sh -= dt
+                          if (c.sh <= 0f) {
+                              c.sh = 1f; val a = atan2(pz - c.z, px - c.x) + (rnd.nextFloat() - .5f) * .1f
+                              bu.add(Bu(c.x, c.z, cos(a) * 60f, sin(a) * 60f, 6f, false, 1.2f))
+                          }
+                      }
+                      if (dd < 3.5f) { if (cc != null) cc.hp -= 15f * dt else { php -= 10f * dt; arrest = true } }
+                  }
+                  bustT = if (arrest) bustT + dt else 0f
+                  if (bustT > 2f) { cash = (cash * .8f).toInt(); respawn(); say("BUSTED! Lost 20% cash"); return }
+                  for (i in bu.indices.reversed()) {
+                      val b = bu[i]; b.x += b.vx * dt; b.z += b.vz * dt; b.life -= dt
+                      var hit = b.life <= 0f || solid(b.x, b.z)
+                      if (!hit) {
+                          if (b.mine) {
+                              for (pd in peds) if (pd.hp > 0f && hypot(pd.x - b.x, pd.z - b.z) < 1f) {
+                                  pd.hp -= b.dmg; hit = true
+                                  if (pd.hp <= 0f) { cash += 20 + rnd.nextInt(40); wanted(1) }
+                                  break
+                              }
+                              if (!hit) for (c in cars) if (c.kind == 1 && c !== car && hypot(c.x - b.x, c.z - b.z) < 2.4f) {
+                                  c.hp -= b.dmg; hit = true; wanted(2)
+                                  if (c.hp <= 0f) { cash += 100; stars = min(5, stars + 1); say("Police car destroyed +\$100") }
+                                  break
+                              }
+                          } else if (hypot(px - b.x, pz - b.z) < 1.4f) {
+                              if (cc != null) cc.hp -= b.dmg * .5f else php -= b.dmg
+                              hit = true
+                          }
+                      }
+                      if (hit) bu.removeAt(i)
+                  }
+                  peds.removeAll { it.hp <= 0f }
+                  cars.removeIf { it.hp <= 0f && it !== car }
+                  if (cc != null && cc.hp <= 0f) { cars.remove(cc); car = null; php -= 40f; say("Car destroyed!") }
+                  if (cars.count { it.kind == 0 && !it.own } < 24 && rnd.nextInt(60) == 0) { val n = newCiv(); if (hypot(n.x - px, n.z - pz) > 90f) cars.add(n) }
+                  if (peds.size < 45 && rnd.nextInt(60) == 0) { val n = newPed(); if (hypot(n.x - px, n.z - pz) > 60f) peds.add(n) }
+                  if (php <= 0f) { wastedT = 3f; car = null }
+              }
+
+              private fun drive(c: Car, dt: Float) {
+                  val thr = -ly
+                  c.spd = (c.spd + thr * 18f * dt - c.spd * .5f * dt).coerceIn(-8f, c.max)
+                  c.ang += lx * 1.8f * dt * (c.spd / 8f).coerceIn(-1f, 1f)
+                  val b = mv(c.x, c.z, cos(c.ang) * c.spd * dt, sin(c.ang) * c.spd * dt, 1.7f)
+                  if (b) { c.hp -= abs(c.spd) * .6f; c.spd *= -.3f }
+                  c.x = tmp[0]; c.z = tmp[1]; px = c.x; pz = c.z
+                  for (o in cars) if (o !== c && hypot(o.x - c.x, o.z - c.z) < 4f) {
+                      val rel = abs(c.spd - o.spd)
+                      o.hp -= rel * .8f; c.hp -= rel * .4f; c.spd *= .5f; o.spd *= .5f
+                      o.x += cos(c.ang); o.z += sin(c.ang)
+                  }
+                  for (pd in peds) if (pd.hp > 0f && abs(c.spd) > 6f && hypot(pd.x - c.x, pd.z - c.z) < 2f) { pd.hp = 0f; cash += 15; wanted(1) }
+              }
+
+              private fun civ(c: Car, dt: Float) {
+                  val fx = c.x + cos(c.ang) * 7f; val fz = c.z + sin(c.ang) * 7f
+                  var stop = hypot(px - fx, pz - fz) < 4f
+                  if (!stop) for (o in cars) if (o !== c && hypot(o.x - fx, o.z - fz) < 4.5f) { stop = true; break }
+                  if (!stop) for (pd in peds) if (hypot(pd.x - fx, pd.z - fz) < 3f) { stop = true; break }
+                  if (stop) c.cd += dt else c.cd = 0f
+                  if (c.cd > 3f) { stop = false; if (c.cd > 4.5f) c.cd = 0f }
+                  c.spd = if (stop) max(0f, c.spd - 20f * dt) else min(8f, c.spd + 5f * dt)
+                  c.x += cos(c.ang) * c.spd * dt; c.z += sin(c.ang) * c.spd * dt
+                  if (c.x < 2f) c.x = WORLD - 2f; if (c.x > WORLD - 2f) c.x = 2f
+                  if (c.z < 2f) c.z = WORLD - 2f; if (c.z > WORLD - 2f) c.z = 2f
+              }
+
+              private fun police(c: Car, dt: Float) {
+                  val want = atan2(pz - c.z, px - c.x)
+                  if (c.cd > 0f) c.cd -= dt else c.ang = want
+                  val k = if (hypot(px - c.x, pz - c.z) < 5f) 0f else 1f
+                  val b = mv(c.x, c.z, cos(c.ang) * 20f * dt * k, sin(c.ang) * 20f * dt * k, 1.7f)
+                  c.x = tmp[0]; c.z = tmp[1]
+                  if (b && c.cd <= 0f) { c.ang = want + (if (rnd.nextBoolean()) 1.57f else -1.57f); c.cd = .6f }
+              }
+
+              private fun ped(pd: Ped, dt: Float) {
+                  pd.t -= dt; if (pd.flee > 0f) pd.flee -= dt
+                  if (pd.t <= 0f) {
+                      pd.t = 1f + rnd.nextFloat() * 3f
+                      val a = if (pd.flee > 0f) atan2(pd.z - pz, pd.x - px) else rnd.nextFloat() * 6.283f
+                      val s = if (pd.flee > 0f) 5f else 1.6f
+                      pd.vx = cos(a) * s; pd.vz = sin(a) * s; pd.ang = a
+                  }
+                  val b = mv(pd.x, pd.z, pd.vx * dt, pd.vz * dt, .4f); pd.x = tmp[0]; pd.z = tmp[1]; if (b) pd.t = 0f
+              }
+          }
+          EOF2
+          mkdir -p $(dirname app/src/main/java/com/zone/city3d/Hud.kt)
+          cat > app/src/main/java/com/zone/city3d/Hud.kt <<'EOF3'
+          package com.zone.city3d
+
+          import android.content.Context
+          import android.graphics.*
+          import android.view.MotionEvent
+          import android.view.View
+          import kotlin.math.*
+
+          class Hud(c: Context) : View(c) {
+              private val d = resources.displayMetrics.density
+              private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val path = Path()
+              private var W = 800f; private var H = 360f
+              private var lId = -1; private var rId = -1; private var fId = -1
+              private var lcx = 0f; private var lcy = 0f; private var rLast = 0f
+
+              private fun norm(dx: Float, dy: Float): FloatArray {
+                  val l = hypot(dx, dy); val s = if (l > 60f) 60f / l else 1f
+                  return floatArrayOf(dx * s / 60f, dy * s / 60f)
+              }
+
+              override fun onTouchEvent(e: MotionEvent): Boolean {
+                  val a = e.actionMasked; val i = e.actionIndex
+                  if (G.shop >= 0) {
+                      if (a == MotionEvent.ACTION_DOWN) {
+                          val x = e.x / d; val y = e.y / d
+                          val items = G.shopItems(G.shop)
+                          for (k in 0..items.size) {
+                              val top = 96f + k * 44f
+                              if (x in W / 2 - 170f..W / 2 + 170f && y in top..top + 38f) {
+                                  if (k == items.size) G.shop = -1 else items[k].second()
+                              }
+                          }
+                      }
+                      return true
+                  }
+                  when (a) {
+                      MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                          val id = e.getPointerId(i); val x = e.getX(i) / d; val y = e.getY(i) / d
+                          if (G.wastedT > 0f) return true
+                          if (hypot(x - (W - 70f), y - (H - 70f)) < 50f) { fId = id; G.fire = true }
+                          else if (hypot(x - (W - 165f), y - (H - 45f)) < 42f) G.actReq = true
+                          else if (x < W * .4f && lId == -1) { lId = id; lcx = x; lcy = y }
+                          else if (x >= W * .4f && rId == -1) { rId = id; rLast = e.getX(i) }
+                      }
+                      MotionEvent.ACTION_MOVE -> for (k in 0 until e.pointerCount) {
+                          val id = e.getPointerId(k)
+                          if (id == lId) { val v = norm(e.getX(k) / d - lcx, e.getY(k) / d - lcy); G.lx = v[0]; G.ly = v[1] }
+                          if (id == rId) { G.yaw += (e.getX(k) - rLast) * .006f; rLast = e.getX(k) }
+                      }
+                      MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
+                          val id = e.getPointerId(i)
+                          if (id == lId) { lId = -1; G.lx = 0f; G.ly = 0f }
+                          if (id == rId) rId = -1
+                          if (id == fId) { fId = -1; G.fire = false }
+                      }
+                  }
+                  return true
+              }
+
+              private fun txt(cv: Canvas, s: String, x: Float, y: Float, size: Float, col: Int, al: Paint.Align) {
+                  p.style = Paint.Style.FILL; p.color = col; p.textSize = size; p.textAlign = al; cv.drawText(s, x, y, p)
+              }
+
+              override fun onDraw(cv: Canvas) {
+                  W = width / d; H = height / d
+                  cv.save(); cv.scale(d, d)
+                  val cc = G.car; val ns = if (cc == null) G.nearShop() else -1
+                  txt(cv, "\$${G.cash}", 14f, 26f, 20f, Color.rgb(120, 230, 120), Paint.Align.LEFT)
+                  txt(cv, G.gunN[G.wpn], 14f, H - 14f, 16f, Color.WHITE, Paint.Align.LEFT)
+                  for (k in 0 until 5) {
+                      val on = k < G.stars && !(G.clearT > 0f && (G.time * 4f).toInt() % 2 == 0)
+                      txt(cv, "\u2605", W / 2 - 60f + k * 26f, 28f, 26f, if (on) Color.YELLOW else Color.GRAY, Paint.Align.LEFT)
+                  }
+                  val hpv = if (cc != null) cc.hp else G.php
+                  p.style = Paint.Style.FILL; p.color = Color.argb(160, 0, 0, 0); cv.drawRect(W / 2 - 62f, 38f, W / 2 + 62f, 50f, p)
+                  p.color = if (cc != null) Color.rgb(80, 160, 255) else Color.rgb(60, 200, 80)
+                  cv.drawRect(W / 2 - 60f, 40f, W / 2 - 60f + 120f * max(0f, hpv) / 100f, 48f, p)
+                  if (ns >= 0) txt(cv, "${G.shopN[ns]} - tap ENTER", W / 2, 72f, 18f, Color.WHITE, Paint.Align.CENTER)
+                  else if (G.msgT > 0f) txt(cv, G.msg, W / 2, 72f, 16f, Color.WHITE, Paint.Align.CENTER)
+                  val mx = 70f; val my = 110f; val mr = 55f; val s = mr / 80f
+                  cv.save(); path.reset(); path.addCircle(mx, my, mr, Path.Direction.CW); cv.clipPath(path)
+                  p.color = Color.rgb(35, 65, 45); cv.drawCircle(mx, my, mr, p); p.color = Color.rgb(95, 95, 100)
+                  for (k in 0..G.N) {
+                      val yy = my + (k * G.CELL + 8f - G.pz) * s; cv.drawRect(mx - mr, yy - 8f * s, mx + mr, yy + 8f * s, p)
+                      val xx = mx + (k * G.CELL + 8f - G.px) * s; cv.drawRect(xx - 8f * s, my - mr, xx + 8f * s, my + mr, p)
+                  }
+                  for (k in 0..4) { p.color = G.shopC[k]; cv.drawCircle(mx + (G.doorX(k) - G.px) * s, my + (G.doorZ(k) - G.pz) * s, 4f, p) }
+                  for (c in G.cars) if (c.kind == 1) { p.color = if ((G.time * 6f).toInt() % 2 == 0) Color.RED else Color.BLUE; cv.drawCircle(mx + (c.x - G.px) * s, my + (c.z - G.pz) * s, 3f, p) }
+                  cv.restore()
+                  p.color = Color.WHITE; cv.drawCircle(mx, my, 4f, p); p.style = Paint.Style.STROKE; p.strokeWidth = 2f; cv.drawCircle(mx, my, mr, p)
+                  if (lId != -1) { p.color = Color.argb(120, 255, 255, 255); cv.drawCircle(lcx, lcy, 50f, p) }
+                  p.style = Paint.Style.FILL
+                  p.color = if (cc == null) Color.argb(150, 220, 40, 40) else Color.argb(80, 120, 120, 120); cv.drawCircle(W - 70f, H - 70f, 42f, p)
+                  p.color = Color.argb(150, 40, 100, 220); cv.drawCircle(W - 165f, H - 45f, 34f, p)
+                  txt(cv, "FIRE", W - 70f, H - 64f, 16f, Color.WHITE, Paint.Align.CENTER)
+                  txt(cv, if (cc != null) "EXIT" else if (ns >= 0) "SHOP" else "ENTER", W - 165f, H - 40f, 14f, Color.WHITE, Paint.Align.CENTER)
+                  if (G.wastedT > 0f) {
+                      p.style = Paint.Style.FILL; p.color = Color.argb(150, 0, 0, 0); cv.drawRect(0f, 0f, W, H, p)
+                      txt(cv, "WASTED", W / 2, H / 2 + 14f, 52f, Color.RED, Paint.Align.CENTER)
+                  }
+                  if (G.shop >= 0) {
+                      val items = G.shopItems(G.shop)
+                      p.style = Paint.Style.FILL; p.color = Color.argb(215, 15, 25, 40); cv.drawRect(W / 2 - 180f, 12f, W / 2 + 180f, 108f + (items.size + 1) * 44f, p)
+                      txt(cv, G.shopN[G.shop], W / 2, 50f, 26f, G.shopC[G.shop], Paint.Align.CENTER)
+                      txt(cv, "Cash: \$${G.cash}", W / 2, 76f, 15f, Color.YELLOW, Paint.Align.CENTER)
+                      for (k in 0..items.size) {
+                          val top = 96f + k * 44f
+                          p.style = Paint.Style.FILL; p.color = if (k == items.size) Color.rgb(120, 40, 40) else Color.rgb(35, 85, 130)
+                          cv.drawRoundRect(W / 2 - 170f, top, W / 2 + 170f, top + 38f, 8f, 8f, p)
+                          txt(cv, if (k == items.size) "Close" else items[k].first, W / 2, top + 25f, 17f, Color.WHITE, Paint.Align.CENTER)
+                      }
+                  }
+                  cv.restore()
+                  postInvalidateOnAnimation()
+              }
+          }
+          EOF3
+          mkdir -p $(dirname app/src/main/java/com/zone/city3d/MainActivity.kt)
+          cat > app/src/main/java/com/zone/city3d/MainActivity.kt <<'EOF4'
+          package com.zone.city3d
+
+          import android.app.Activity
+          import android.opengl.GLSurfaceView
+          import android.os.Bundle
+          import android.widget.FrameLayout
+
+          class MainActivity : Activity() {
+              private lateinit var gl: GLSurfaceView
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  G.init(getSharedPreferences("city3d", MODE_PRIVATE))
+                  gl = GLSurfaceView(this)
+                  gl.setEGLContextClientVersion(2)
+                  gl.setRenderer(Rend())
+                  gl.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+                  val root = FrameLayout(this)
+                  root.addView(gl)
+                  root.addView(Hud(this))
+                  setContentView(root)
+              }
+              override fun onPause() { super.onPause(); gl.onPause(); G.save() }
+              override fun onResume() { super.onResume(); gl.onResume() }
+          }
+          EOF4
+          mkdir -p $(dirname app/src/main/java/com/zone/city3d/Rend.kt)
+          cat > app/src/main/java/com/zone/city3d/Rend.kt <<'EOF5'
+          package com.zone.city3d
+
+          import android.graphics.Color
+          import android.opengl.GLES20
+          import android.opengl.GLSurfaceView
+          import android.opengl.Matrix
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+          import java.nio.FloatBuffer
+          import javax.microedition.khronos.egl.EGLConfig
+          import javax.microedition.khronos.opengles.GL10
+          import kotlin.math.*
+
+          class Rend : GLSurfaceView.Renderer {
+              private var prog = 0; private var aPos = 0; private var aNor = 0; private var uMvp = 0; private var uRot = 0; private var uCol = 0
+              private lateinit var vb: FloatBuffer
+              private val proj = FloatArray(16); private val view = FloatArray(16); private val vp = FloatArray(16)
+              private val m = FloatArray(16); private val mvp = FloatArray(16); private val rot = FloatArray(16)
+              private var last = System.nanoTime(); private var aspect = 1.8f
+
+              private fun shader(type: Int, src: String): Int {
+                  val s = GLES20.glCreateShader(type); GLES20.glShaderSource(s, src); GLES20.glCompileShader(s); return s
+              }
+
+              private fun cube(): FloatArray {
+                  val ns = arrayOf(floatArrayOf(1f, 0f, 0f), floatArrayOf(-1f, 0f, 0f), floatArrayOf(0f, 1f, 0f),
+                      floatArrayOf(0f, -1f, 0f), floatArrayOf(0f, 0f, 1f), floatArrayOf(0f, 0f, -1f))
+                  val out = ArrayList<Float>()
+                  for (f in ns) {
+                      val u = if (abs(f[1]) > .5f) floatArrayOf(1f, 0f, 0f) else floatArrayOf(0f, 1f, 0f)
+                      val v = floatArrayOf(f[1] * u[2] - f[2] * u[1], f[2] * u[0] - f[0] * u[2], f[0] * u[1] - f[1] * u[0])
+                      for ((a, b) in listOf(-1 to -1, 1 to -1, 1 to 1, -1 to -1, 1 to 1, -1 to 1)) {
+                          for (k in 0..2) out.add(.5f * f[k] + .5f * a * u[k] + .5f * b * v[k])
+                          for (k in 0..2) out.add(f[k])
+                      }
+                  }
+                  return out.toFloatArray()
+              }
+
+              override fun onSurfaceCreated(gl: GL10?, c: EGLConfig?) {
+                  GLES20.glClearColor(.55f, .75f, .95f, 1f); GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+                  val vs = "attribute vec3 aPos; attribute vec3 aNor; uniform mat4 uMvp; uniform mat4 uRot; varying float vL;" +
+                      "void main(){ gl_Position = uMvp * vec4(aPos,1.0); vec3 n = normalize((uRot * vec4(aNor,0.0)).xyz);" +
+                      "vL = 0.45 + 0.55 * max(dot(n, normalize(vec3(0.4,0.9,0.3))), 0.0); }"
+                  val fs = "precision mediump float; uniform vec4 uCol; varying float vL; void main(){ gl_FragColor = vec4(uCol.rgb * vL, 1.0); }"
+                  prog = GLES20.glCreateProgram()
+                  GLES20.glAttachShader(prog, shader(GLES20.GL_VERTEX_SHADER, vs)); GLES20.glAttachShader(prog, shader(GLES20.GL_FRAGMENT_SHADER, fs))
+                  GLES20.glLinkProgram(prog)
+                  aPos = GLES20.glGetAttribLocation(prog, "aPos"); aNor = GLES20.glGetAttribLocation(prog, "aNor")
+                  uMvp = GLES20.glGetUniformLocation(prog, "uMvp"); uRot = GLES20.glGetUniformLocation(prog, "uRot"); uCol = GLES20.glGetUniformLocation(prog, "uCol")
+                  val d = cube()
+                  vb = ByteBuffer.allocateDirect(d.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
+                  vb.put(d); vb.position(0)
+              }
+
+              override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) { GLES20.glViewport(0, 0, w, h); aspect = w.toFloat() / max(1, h) }
+
+              private fun box(x: Float, y: Float, z: Float, sx: Float, sy: Float, sz: Float, ry: Float, col: Int) {
+                  Matrix.setIdentityM(m, 0); Matrix.translateM(m, 0, x, y, z); Matrix.rotateM(m, 0, ry, 0f, 1f, 0f); Matrix.scaleM(m, 0, sx, sy, sz)
+                  Matrix.multiplyMM(mvp, 0, vp, 0, m, 0)
+                  Matrix.setRotateM(rot, 0, ry, 0f, 1f, 0f)
+                  GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0); GLES20.glUniformMatrix4fv(uRot, 1, false, rot, 0)
+                  GLES20.glUniform4f(uCol, Color.red(col) / 255f, Color.green(col) / 255f, Color.blue(col) / 255f, 1f)
+                  GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 36)
+              }
+
+              private fun person(x: Float, z: Float, ang: Float, shirt: Int, hair: Int, armed: Boolean) {
+                  val ry = -ang * 57.2958f
+                  box(x, .45f, z, .35f, .9f, .5f, ry, 0xFF263238.toInt())
+                  box(x, 1.25f, z, .4f, .7f, .6f, ry, shirt)
+                  box(x, 1.8f, z, .4f, .4f, .4f, ry, 0xFFF1C27D.toInt())
+                  box(x, 2.03f, z, .44f, .14f, .44f, ry, hair)
+                  if (armed) box(x + cos(ang) * .6f, 1.3f, z + sin(ang) * .6f, .9f, .15f, .15f, ry, 0xFF111111.toInt())
+              }
+
+              private fun carModel(c: Car) {
+                  val a = c.ang; val ry = -a * 57.2958f; val fx = cos(a); val fz = sin(a)
+                  val body = if (c.kind == 1) 0xFFEEEEEE.toInt() else c.col
+                  box(c.x, .8f, c.z, 4f, .9f, 1.9f, ry, body)
+                  box(c.x - fx * .3f, 1.55f, c.z - fz * .3f, 2f, .7f, 1.6f, ry, 0xFF37474F.toInt())
+                  for (s in intArrayOf(-1, 1)) for (t in intArrayOf(-1, 1))
+                      box(c.x + fx * 1.3f * s - fz * 1f * t, .35f, c.z + fz * 1.3f * s + fx * 1f * t, .7f, .7f, .3f, ry, 0xFF111111.toInt())
+                  if (c.kind == 1) box(c.x, 2f, c.z, .4f, .2f, 1.2f, ry, if ((G.time * 6f).toInt() % 2 == 0) 0xFFFF0000.toInt() else 0xFF0000FF.toInt())
+              }
+
+              override fun onDrawFrame(gl: GL10?) {
+                  val now = System.nanoTime(); val dt = ((now - last) / 1e9f).coerceAtMost(.05f); last = now
+                  G.update(dt)
+                  GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
+                  val tx = G.px; val tz = G.pz; val inCar = G.car != null
+                  val dist = if (inCar) 10f else 6.5f; val hgt = if (inCar) 4.5f else 3.2f
+                  val fx = cos(G.yaw); val fz = sin(G.yaw)
+                  Matrix.setLookAtM(view, 0, tx - fx * dist, hgt, tz - fz * dist, tx, 1.2f, tz, 0f, 1f, 0f)
+                  Matrix.perspectiveM(proj, 0, 60f, aspect, .3f, 500f)
+                  Matrix.multiplyMM(vp, 0, proj, 0, view, 0)
+                  GLES20.glUseProgram(prog)
+                  vb.position(0); GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 24, vb); GLES20.glEnableVertexAttribArray(aPos)
+                  vb.position(3); GLES20.glVertexAttribPointer(aNor, 3, GLES20.GL_FLOAT, false, 24, vb); GLES20.glEnableVertexAttribArray(aNor)
+                  val W = G.WORLD; val C = G.CELL
+                  box(W / 2, -.5f, W / 2, W + 120f, 1f, W + 120f, 0f, 0xFF3A3D42.toInt())
+                  for (k in 0 until G.N) {
+                      box(W / 2, .03f, k * C + 8f, W, .06f, .3f, 0f, 0xFFE6C83C.toInt())
+                      box(k * C + 8f, .03f, W / 2, .3f, .06f, W, 0f, 0xFFE6C83C.toInt())
+                  }
+                  for (i in 0 until G.N) for (j in 0 until G.N) {
+                      val bx = i * C; val bz = j * C
+                      if (hypot(bx + 38f - tx, bz + 38f - tz) > 170f) continue
+                      box(bx + 38f, .1f, bz + 38f, 44f, .2f, 44f, 0f, 0xFF9A9A94.toInt())
+                      val sk = (0 until 5).firstOrNull { G.shopI[it] == i && G.shopJ[it] == j } ?: -1
+                      val h = if (sk >= 0) 10f else 12f + ((i * 7 + j * 13) % 5) * 7f
+                      val col = if (sk >= 0) G.shopC[sk] else intArrayOf(0xFF8C5A50.toInt(), 0xFF5A6E8C.toInt(), 0xFF78785A.toInt(), 0xFF648264.toInt(), 0xFF826482.toInt())[(i * 7 + j * 13) % 5]
+                      box(bx + 38f, .2f + h / 2, bz + 38f, 36f, h, 36f, 0f, col)
+                      if (sk >= 0) box(bx + 38f, h + 3f, bz + 38f, 14f, 6f, 14f, 0f, 0xFFFFFFFF.toInt())
+                  }
+                  for (k in 0..4) {
+                      val dx = G.doorX(k); val dz = G.doorZ(k)
+                      box(dx, .25f, dz, 3f, .1f, 3f, 0f, G.shopC[k]); box(dx, 2.5f, dz, .4f, 5f, .4f, 0f, G.shopC[k]); box(dx, 5.2f, dz, 3.5f, 1f, .5f, 0f, G.shopC[k])
+                  }
+                  for (c in G.cars) if (hypot(c.x - tx, c.z - tz) < 150f) carModel(c)
+                  for (p in G.peds) if (hypot(p.x - tx, p.z - tz) < 120f) person(p.x, p.z, p.ang, p.col, 0xFF3E2723.toInt(), false)
+                  for (b in G.bu) box(b.x, 1.3f, b.z, .25f, .25f, .25f, 0f, if (b.mine) 0xFFFFEB3B.toInt() else 0xFFFF5722.toInt())
+                  if (G.car == null && G.wastedT <= 0f) person(G.px, G.pz, G.pang, G.shirtC[G.shirt], G.hairC[G.hair], true)
+              }
+          }
+          EOF5
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF6'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF6
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF7'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "City3D"
+          include(":app")
+          EOF7
+          printf "android.useAndroidX=true\norg.gradle.jvmargs=-Xmx3g\n" > gradle.properties
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - run: cd c3d && gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: City3D-apk
+          path: c3d/app/build/outputs/apk/debug/app-debug.apk
